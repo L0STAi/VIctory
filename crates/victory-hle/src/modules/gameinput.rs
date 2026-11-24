@@ -8,6 +8,11 @@
 // would trust.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(windows)]
+mod sdl_driver;
+#[cfg(windows)]
+pub use sdl_driver::SdlDriver;
+
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ops::Deref;
@@ -36,20 +41,20 @@ const STATUS_CONNECTED: u32 = 0x3;
 const ASYNC_ENUMERATION: u32 = 1;
 
 /// Gamepad buttons; the title maps each bit to one of its pad buttons.
-const MENU: u32 = 0x1;
-const VIEW: u32 = 0x2;
-const A: u32 = 0x4;
-const B: u32 = 0x8;
-const X: u32 = 0x10;
-const Y: u32 = 0x20;
-const UP: u32 = 0x40;
-const DOWN: u32 = 0x80;
-const LEFT: u32 = 0x100;
-const RIGHT: u32 = 0x200;
-const LEFT_SHOULDER: u32 = 0x400;
-const RIGHT_SHOULDER: u32 = 0x800;
-const LEFT_STICK: u32 = 0x1000;
-const RIGHT_STICK: u32 = 0x2000;
+pub(crate) const MENU: u32 = 0x1;
+pub(crate) const VIEW: u32 = 0x2;
+pub(crate) const A: u32 = 0x4;
+pub(crate) const B: u32 = 0x8;
+pub(crate) const X: u32 = 0x10;
+pub(crate) const Y: u32 = 0x20;
+pub(crate) const UP: u32 = 0x40;
+pub(crate) const DOWN: u32 = 0x80;
+pub(crate) const LEFT: u32 = 0x100;
+pub(crate) const RIGHT: u32 = 0x200;
+pub(crate) const LEFT_SHOULDER: u32 = 0x400;
+pub(crate) const RIGHT_SHOULDER: u32 = 0x800;
+pub(crate) const LEFT_STICK: u32 = 0x1000;
+pub(crate) const RIGHT_STICK: u32 = 0x2000;
 
 /// Devices: host pad slots, the keyboard's stand-in pad, the keyboard.
 const PADS: usize = 4;
@@ -83,14 +88,25 @@ const FALLBACK_BUTTONS: [(u8, u32); 14] = [
 /// A gamepad reading: triggers 0 to 1, sticks -1 to 1 (up positive).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct PadState {
-    buttons: u32,
-    left_trigger: f32,
-    right_trigger: f32,
-    left_x: f32,
-    left_y: f32,
-    right_x: f32,
-    right_y: f32,
+pub(crate) struct PadState {
+    pub(crate) buttons: u32,
+    pub(crate) left_trigger: f32,
+    pub(crate) right_trigger: f32,
+    pub(crate) left_x: f32,
+    pub(crate) left_y: f32,
+    pub(crate) right_x: f32,
+    pub(crate) right_y: f32,
+}
+
+#[cfg(windows)]
+static SDL_RUMBLE: std::sync::Mutex<[Option<(u16, u16)>; PADS]> = std::sync::Mutex::new([None; PADS]);
+#[cfg(windows)]
+pub(crate) fn take_sdl_rumble() -> [Option<(u16, u16)>; PADS] { let mut commands = SDL_RUMBLE.lock().unwrap_or_else(|e| e.into_inner()); std::mem::replace(&mut *commands, [None; PADS]) }
+static SDL_PADS: std::sync::Mutex<Option<[Option<PadState>; PADS]>> = std::sync::Mutex::new(None);
+
+/// Publish SDL3 controller readings from the main thread.
+pub(crate) fn publish_sdl_pads(pads: [Option<PadState>; PADS]) {
+    *SDL_PADS.lock().unwrap_or_else(|e| e.into_inner()) = Some(pads);
 }
 
 /// One key held down: scan code (0xE0xx when extended), character, key.
@@ -1134,6 +1150,9 @@ mod host {
 
     impl Source for Host {
         fn pad(&mut self, slot: usize) -> Option<PadState> {
+            if let Some(pads) = *SDL_PADS.lock().unwrap_or_else(|e| e.into_inner()) {
+                return pads[slot];
+            }
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
             }
@@ -1175,6 +1194,7 @@ mod host {
         }
 
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
+            if slot < PADS && SDL_PADS.lock().unwrap_or_else(|e| e.into_inner()).is_some() { SDL_RUMBLE.lock().unwrap_or_else(|e| e.into_inner())[slot] = Some((low, high)); return; }
             let speeds = XINPUT_VIBRATION {
                 wLeftMotorSpeed: low,
                 wRightMotorSpeed: high,

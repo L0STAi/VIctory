@@ -15,6 +15,7 @@ victory-formats.workspace = true
 opus-pure.workspace = true
 miniz_oxide.workspace = true
 tracing.workspace = true
+sdl3 = { version = "0.22.1", features = ["build-from-source"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

@@ -116,8 +116,10 @@ pub fn run(
     victory_hle::runtime::set_title_dll_loader(Box::new(move |file| {
         late.load(file, show).map_err(|e| format!("{e:#}"))
     }));
+    let mut sdl = match victory_hle::modules::gameinput::SdlDriver::new() { Ok(mut driver) => { driver.poll(); println!("SDL3 gamepad support initialized"); Some(driver) }, Err(e) => { eprintln!("SDL3 unavailable: {e}; using XInput fallback"); None } };
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
+    while !main.is_finished() { if let Some(driver) = sdl.as_mut() { driver.poll(); } std::thread::sleep(std::time::Duration::from_millis(8)); }
     let code = main
         .join()
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
