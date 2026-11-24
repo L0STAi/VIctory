@@ -1146,11 +1146,18 @@ mod host {
     #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        #[cfg(test)]
+        pub(super) test_xinput: Option<unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32>,
+    }
+
+    fn active_sdl_pads() -> Option<[Option<PadState>; PADS]> {
+        // Prefer one backend at a time to avoid publishing the same pad twice.
+        (*lock(&SDL_PADS)).filter(|pads| pads.iter().any(Option::is_some))
     }
 
     impl Source for Host {
         fn pad(&mut self, slot: usize) -> Option<PadState> {
-            if let Some(pads) = *SDL_PADS.lock().unwrap_or_else(|e| e.into_inner()) {
+            if let Some(pads) = active_sdl_pads() {
                 return pads[slot];
             }
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
@@ -1158,7 +1165,11 @@ mod host {
             }
             let mut state = XINPUT_STATE::default();
             // SAFETY: room for the state.
-            if unsafe { XInputGetState(slot as u32, &mut state) } != 0 {
+            #[cfg(not(test))]
+            let get_state = XInputGetState;
+            #[cfg(test)]
+            let get_state = self.test_xinput.unwrap_or(XInputGetState);
+            if unsafe { get_state(slot as u32, &mut state) } != 0 {
                 self.empty_until[slot] = Some(Instant::now() + EMPTY_SLOT_RECHECK);
                 return None;
             }
@@ -1194,7 +1205,10 @@ mod host {
         }
 
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
-            if slot < PADS && SDL_PADS.lock().unwrap_or_else(|e| e.into_inner()).is_some() { SDL_RUMBLE.lock().unwrap_or_else(|e| e.into_inner())[slot] = Some((low, high)); return; }
+            if slot < PADS && active_sdl_pads().is_some() {
+                lock(&SDL_RUMBLE)[slot] = Some((low, high));
+                return;
+            }
             let speeds = XINPUT_VIBRATION {
                 wLeftMotorSpeed: low,
                 wRightMotorSpeed: high,
@@ -1420,6 +1434,49 @@ mod tests {
 
     fn release(reading: *const Reading) {
         slot::<extern "system" fn(*const Reading) -> u32, _>(reading, 0x10)(reading);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn empty_sdl_publication_falls_back_to_xinput() {
+        use windows_sys::Win32::UI::Input::XboxController::{
+            XINPUT_GAMEPAD_A, XINPUT_STATE,
+        };
+
+        unsafe extern "system" fn connected_pad(slot: u32, state: *mut XINPUT_STATE) -> u32 {
+            if slot != 0 {
+                return 1167; // ERROR_DEVICE_NOT_CONNECTED
+            }
+            // SAFETY: Host::pad supplies a writable XInput state.
+            unsafe { (*state).Gamepad.wButtons = XINPUT_GAMEPAD_A };
+            0
+        }
+
+        struct ResetPads;
+        impl Drop for ResetPads {
+            fn drop(&mut self) {
+                *lock(&SDL_PADS) = None;
+            }
+        }
+        let _reset = ResetPads;
+        let mut backend = host::Host::default();
+        backend.test_xinput = Some(connected_pad);
+        let hub = Hub::new(Box::new(backend));
+        for (sdl, expected) in [(None, A), (Some(B), B), (None, A)] {
+            let mut pads = [None; PADS];
+            pads[0] = sdl.map(|buttons| PadState {
+                buttons,
+                ..Default::default()
+            });
+            *lock(&SDL_PADS) = Some(pads);
+            hub.poll();
+            let sampled = current(hub, GAMEPAD_KIND, 0);
+            let reading = sampled.expect("gamepad reading");
+            let buttons = pad(reading).buttons;
+            eprintln!("SDL connected={} -> buttons={buttons:#x}", sdl.is_some());
+            assert_eq!(buttons, expected);
+            release(reading);
+        }
     }
 
     #[test]
